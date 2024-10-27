@@ -1,6 +1,6 @@
 # Omnidirectional Walking Pattern Generation for Humanoid Robot using ZMP Analytical Method
 
-By: Eko Rudiawan
+Modified version from Eko Rudiawan
 
 **Overview**
 
