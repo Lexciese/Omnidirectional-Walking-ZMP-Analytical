@@ -35,6 +35,14 @@ class GaitController():
     def __init__(self):
         # Constant distance between hip to center 
         self.hip_offset = 0.035
+        self.epsilon = np.finfo(np.float32).eps
+        self.err_min = 1e-2
+        # Konfigurasi link in mm
+        self.CROTCH_TO_HIP = 0.035 # Jarak croth ke hip
+        self.UPPER_HIP = 0.050 # Jarak hip yaw ke hip roll pitch
+        self.HIP_TO_KNEE = 0.2215 # Panjang link upper leg
+        self.KNEE_TO_ANKLE = 0.2215 # Panjang link lower leg
+        self.ANKLE_TO_SOLE = 0.053 # Jarak ankle ke sole
 
         # Command for walking pattern
         # Defined as motion vector 
@@ -451,6 +459,61 @@ class GaitController():
     def end(self):
         pass
     
+    def pose_error(self, f_target, f_result):
+        f_diff = f_target.Inverse() * f_result
+        [dx, dy, dz] = f_diff.p
+        [drz, dry, drx] = f_diff.M.GetEulerZYX()
+        error = np.sqrt(dx**2 + dy**2 + dz**2 + drx**2 + dry**2 + drz**2)
+        error_list = [dx, dy, dz, drx, dry, drz]
+        return error, error_list
+
+    def calculate_leg_kinematics(self, x, y, z, yaw, CROTCH_TO_HIP, UPPER_HIP, HIP_TO_KNEE, KNEE_TO_ANKLE, ANKLE_TO_SOLE, invert=False):
+        x_from_hip = (x - 0)
+        y_from_hip = (y - CROTCH_TO_HIP)
+        z_from_hip = (z + (UPPER_HIP + ANKLE_TO_SOLE))
+
+        xa = x_from_hip
+        ya = xa * np.tan(yaw)
+        beta = np.pi/2 - yaw
+        yb = (y_from_hip - ya)
+        gamma = np.pi/2 - beta
+        xb = xa / np.cos(yaw) + np.sin(gamma) * (y_from_hip - ya)
+        x_from_hip_yaw = xb
+        y_from_hip_yaw = yb
+        z_from_hip_yaw = z_from_hip
+
+        C = np.sqrt(xb**2 + yb**2 + z_from_hip_yaw**2)
+        zb = np.sqrt(yb**2 + z_from_hip_yaw**2)
+        zc = np.sqrt(xb**2 + z_from_hip_yaw**2)
+        zeta = np.arctan2(yb, zc)
+        Cb = np.sign(xb)*np.sqrt(C**2 - zb**2)
+
+        q_hip_yaw = yaw
+        q_hip_roll = zeta 
+        q_hip_pitch = -(np.arctan2(Cb, np.sign(z_from_hip_yaw)*z_from_hip_yaw) + np.arccos((C/2)/HIP_TO_KNEE))
+        q_knee = np.pi-(2*(np.arcsin((C/2)/HIP_TO_KNEE)))
+        q_ankle_pitch = -(np.pi/2 - (np.arctan2(np.sign(z_from_hip_yaw)*z_from_hip_yaw, Cb) + np.arccos((C/2)/HIP_TO_KNEE)))
+        q_ankle_roll = -q_hip_roll
+
+        if invert:
+            q_hip_yaw = -q_hip_yaw
+            q_hip_roll = -q_hip_roll
+            q_hip_pitch = -q_hip_pitch
+            q_ankle_pitch = -q_ankle_pitch
+            q_ankle_roll = -q_ankle_roll
+        
+        print("hip_yaw :", (q_hip_yaw))
+        print("q_hip_roll", q_hip_roll)
+        print("hip_roll :", (q_hip_roll))
+        print("cb ", Cb)
+        print("hip_pitch :", (q_hip_pitch))
+        print("knee :", (q_knee))
+        print("ankle_pitch :", (q_ankle_pitch))
+        print("ankle_roll :", (q_ankle_roll))
+        
+        print("=====================================")
+
+        return q_hip_yaw, q_hip_roll, q_hip_pitch, q_knee, q_ankle_pitch, q_ankle_roll
     
     # Used for Inverse Kinematic
     # init_pos and target_pos is servo angle calculated by inverse kinematic
