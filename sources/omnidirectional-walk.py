@@ -20,6 +20,10 @@ from pytransform3d.transformations import transform_from, concat
 import pinocchio as pin
 from pinocchio.robot_wrapper import RobotWrapper
 
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import time
 # import kinematics as kine
 
 robot = RobotWrapper.BuildFromURDF("tes.urdf", root_joint=pin.JointModelFreeFlyer())
@@ -31,8 +35,16 @@ data = robot.data
 RIGHT_SUPPORT = 0
 LEFT_SUPPORT = 1
 
-class GaitController():
+class GaitController(Node):
     def __init__(self):
+        super().__init__('joint_state_publisher')
+        self.publisher_ = self.create_publisher(JointState, '/experimental/joint_states', 10)
+        self.get_logger().info("JointStatePublisher started")
+        # Initialize JointState message
+        self.joint_state = JointState()
+        self.joint_state.name = ['head_pan', 'head_tilt', 'l_hip_yaw', 'l_hip_roll', 'l_hip_pitch', 'l_knee', 'l_ank_pitch', 'l_ank_roll', 'l_sho_pitch', 'l_sho_roll', 'l_el', 'r_hip_yaw', 'r_hip_roll', 'r_hip_pitch', 'r_knee', 'r_ank_pitch', 'r_ank_roll', 'r_sho_pitch', 'r_sho_roll', 'r_el']
+        self.joint_state.position = np.zeros(20)
+        
         # Constant distance between hip to center 
         self.hip_offset = 0.035
         self.epsilon = np.finfo(np.float32).eps
@@ -40,13 +52,13 @@ class GaitController():
         # Konfigurasi link in mm
         self.CROTCH_TO_HIP = 0.035 # Jarak croth ke hip
         self.UPPER_HIP = 0.050 # Jarak hip yaw ke hip roll pitch
-        self.HIP_TO_KNEE = 0.2215 # Panjang link upper leg
-        self.KNEE_TO_ANKLE = 0.2215 # Panjang link lower leg
+        self.HIP_TO_KNEE = 0.11 # Panjang link upper leg
+        self.KNEE_TO_ANKLE = 0.11 # Panjang link lower leg
         self.ANKLE_TO_SOLE = 0.053 # Jarak ankle ke sole
 
         # Command for walking pattern
         # Defined as motion vector 
-        self.cmd_x = 0.05
+        self.cmd_x = 0.04
         self.cmd_y = 0.00
         self.cmd_a = np.radians(0)
 
@@ -156,7 +168,7 @@ class GaitController():
     # Set default gait parameter
     def get_gait_parameter(self):
         self.zc = self.get_COM_height() # CoM constant height
-        self.max_swing_height = 0.03 # Maximum swing foot height 
+        self.max_swing_height = 0.01 # Maximum swing foot height 
 
         self.t_step = 0.25 # Timing for 1 cycle gait
         self.dsp_ratio = 0.15 # Percent of DSP phase
@@ -433,32 +445,6 @@ class GaitController():
         self.right_foot_pose = [com_to_rfoot[0,3], com_to_rfoot[1,3], com_to_rfoot[2,3], q_rfoot[1], q_rfoot[2], q_rfoot[3], q_rfoot[0]]
     
     # Function for getting walking pattern
-    def get_walking_pattern(self):
-        self.get_zmp_trajectory()
-        self.get_com_trajectory()
-        self.get_foot_trajectory()
-        self.get_foot_pose()
-        self.t += self.dt 
-        if self.t > self.t_step:
-            self.t = 0
-            self.add_new_footstep()
-
-    def initialize(self):
-        self.get_gait_parameter()
-        self.print_gait_parameter()
-    
-    def print_pose(self, name, pose, rpy_mode = True):
-        if rpy_mode:
-            euler = euler_from_quaternion([pose[3], pose[4], pose[5], pose[6]])
-            print(name + " xyz : " + "{0:.3f}".format(pose[0]) +", "+ "{0:.3f}".format(pose[1]) +", "+ "{0:.3f}".format(pose[2]) + \
-            " rpy : " + "{0:.3f}".format(euler[0]) +", "+ "{0:.3f}".format(euler[1]) +", "+ "{0:.3f}".format(euler[2]))
-        else:
-            print(name + " xyz : " + "{0:.3f}".format(pose[0]) +", "+ "{0:.3f}".format(pose[1]) +", "+ "{0:.3f}".format(pose[2]) + \
-            " xyzw : " + "{0:.3f}".format(pose[3]) +", "+ "{0:.3f}".format(pose[4]) +", "+ "{0:.3f}".format(pose[5]) +", "+ "{0:.3f}".format(pose[6]))
-        
-    def end(self):
-        pass
-    
     def pose_error(self, f_target, f_result):
         f_diff = f_target.Inverse() * f_result
         [dx, dy, dz] = f_diff.p
@@ -515,6 +501,61 @@ class GaitController():
 
         return q_hip_yaw, q_hip_roll, q_hip_pitch, q_knee, q_ankle_pitch, q_ankle_roll
     
+    def get_walking_pattern(self):
+        self.get_zmp_trajectory()
+        self.get_com_trajectory()
+        self.get_foot_trajectory()
+        self.get_foot_pose()
+   
+        # Calculate kinematics for right leg
+        q_hip_yaw_r, q_hip_roll_r, q_hip_pitch_r, q_knee_r, q_ankle_pitch_r, q_ankle_roll_r = self.calculate_leg_kinematics(
+            self.left_foot_pose[0], self.left_foot_pose[1], self.left_foot_pose[2], self.cmd_a, self.CROTCH_TO_HIP, self.UPPER_HIP, self.HIP_TO_KNEE, self.KNEE_TO_ANKLE, self.ANKLE_TO_SOLE, invert=True)
+
+        self.joint_state.position[11] = q_hip_yaw_r
+        self.joint_state.position[12] = q_hip_roll_r
+        self.joint_state.position[13] = q_hip_pitch_r
+        self.joint_state.position[14] = -q_knee_r
+        self.joint_state.position[15] = q_ankle_pitch_r
+        self.joint_state.position[16] = q_ankle_roll_r
+        
+        # Calculate kinematics for left leg with inverted angles
+        q_hip_yaw_l, q_hip_roll_l, q_hip_pitch_l, q_knee_l, q_ankle_pitch_l, q_ankle_roll_l = self.calculate_leg_kinematics(
+            self.right_foot_pose[0], self.right_foot_pose[1], self.right_foot_pose[2], self.cmd_a, -self.CROTCH_TO_HIP, self.UPPER_HIP, self.HIP_TO_KNEE, self.KNEE_TO_ANKLE, self.ANKLE_TO_SOLE, invert=False)
+        
+        self.joint_state.position[2] = q_hip_yaw_l
+        self.joint_state.position[3] = q_hip_roll_l
+        self.joint_state.position[4] = q_hip_pitch_l
+        self.joint_state.position[5] = q_knee_l
+        self.joint_state.position[6] = q_ankle_pitch_l
+        self.joint_state.position[7] = -q_ankle_roll_l
+        
+        #  Publish to ROS
+        for i in range(len(self.joint_state.name)):
+            print(self.joint_state.name[i], " : ", self.joint_state.position[i])
+        self.publisher_.publish(self.joint_state)
+        
+        self.t += self.dt 
+        if self.t > self.t_step:
+            self.t = 0
+            self.add_new_footstep()
+
+    def initialize(self):
+        self.get_gait_parameter()
+        self.print_gait_parameter()
+    
+    def print_pose(self, name, pose, rpy_mode = True):
+        if rpy_mode:
+            euler = euler_from_quaternion([pose[3], pose[4], pose[5], pose[6]])
+            print(name + " xyz : " + "{0:.3f}".format(pose[0]) +", "+ "{0:.3f}".format(pose[1]) +", "+ "{0:.3f}".format(pose[2]) + \
+            " rpy : " + "{0:.3f}".format(euler[0]) +", "+ "{0:.3f}".format(euler[1]) +", "+ "{0:.3f}".format(euler[2]))
+        else:
+            print(name + " xyz : " + "{0:.3f}".format(pose[0]) +", "+ "{0:.3f}".format(pose[1]) +", "+ "{0:.3f}".format(pose[2]) + \
+            " xyzw : " + "{0:.3f}".format(pose[3]) +", "+ "{0:.3f}".format(pose[4]) +", "+ "{0:.3f}".format(pose[5]) +", "+ "{0:.3f}".format(pose[6]))
+        
+    def end(self):
+        pass
+    
+    
     # Used for Inverse Kinematic
     # init_pos and target_pos is servo angle calculated by inverse kinematic
     # Return a smooth trajectory
@@ -537,12 +578,13 @@ class GaitController():
         print("Gait Controller   ")
         print("===========================")
         self.initialize()
-        t_sim = 5
+        t_sim = 10
         t = 0
         com_trajectory = []
         lfoot_trajectory = []
         rfoot_trajectory = []
         while t < t_sim:
+            time.sleep(0.01)
             self.get_walking_pattern()
             com_trajectory.append([self.com[0], self.com[1], self.com[2], self.com[6], self.com[3], self.com[4], self.com[5]])
             rfoot_trajectory.append([self.cur_rfoot[0], self.cur_rfoot[1], self.cur_rfoot[2], self.cur_rfoot[6], self.cur_rfoot[3], self.cur_rfoot[4], self.cur_rfoot[5]])
@@ -555,22 +597,24 @@ class GaitController():
             t += self.dt
 
 
-        fig = plt.figure(1)
-        ax = fig.add_subplot(111, projection='3d')
-        com_trajectory = np.array(com_trajectory)
-        rfoot_trajectory = np.array(rfoot_trajectory)
-        lfoot_trajectory = np.array(lfoot_trajectory)
-        plot_trajectory(ax=ax, P=com_trajectory, s=0.01, show_direction=False)
-        plot_trajectory(ax=ax, P=rfoot_trajectory, s=0.01, show_direction=False)
-        plot_trajectory(ax=ax, P=lfoot_trajectory, s=0.01, show_direction=False)
-        ax.set_ylim(-0.2,0.7)
-        ax.set_zlim(0.0,0.5)
-        plt.show()
+        # fig = plt.figure(1)
+        # ax = fig.add_subplot(111, projection='3d')
+        # com_trajectory = np.array(com_trajectory)
+        # rfoot_trajectory = np.array(rfoot_trajectory)
+        # lfoot_trajectory = np.array(lfoot_trajectory)
+        # plot_trajectory(ax=ax, P=com_trajectory, s=0.01, show_direction=False)
+        # plot_trajectory(ax=ax, P=rfoot_trajectory, s=0.01, show_direction=False)
+        # plot_trajectory(ax=ax, P=lfoot_trajectory, s=0.01, show_direction=False)
+        # ax.set_ylim(-0.2,0.7)
+        # ax.set_zlim(0.0,0.5)
+        # plt.show()
         self.end()
 
-def main():
+def main(args=None):
+    rclpy.init(args=args)
     gc = GaitController()
     gc.run()
+    rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
